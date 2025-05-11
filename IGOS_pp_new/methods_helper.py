@@ -54,27 +54,53 @@ def bilateral_tv_norm(image, mask, tv_beta=2, sigma=1):
     return 0.5 * (a + b + bil_a + bil_b)
 
 
-def upscale(masks):
-    """
-        Upsamples masks and expands it to the same dimensions as the image
+#def upscale(masks):
+#    """
+#        Upsamples masks and expands it to the same dimensions as the image
+#
+#    values are set using the init() function
+#    :param masks:
+#    :return:
+#    """
+#    return upscale.up(masks).expand((-1,1,upscale.out_size,upscale.out_size))  # TODO
 
-    values are set using the init() function
-    :param masks:
-    :return:
-    """
-    return upscale.up(masks).expand((-1,1,upscale.out_size,upscale.out_size))  # TODO
+#    return upscale.up(masks).expand((-1,1,upscale.out_size,upscale.out_size))  # TODO
+class Upscale():
+    def __init__(self):
+        pass
 
+    # Initializes the upsampling function for the upscale function
+    def init(self,out_size):
+        """
+        Initializes output size for the upsampler.
+        :param out_size:
+        :return:
+        """
+        if not hasattr(out_size,'__len__'):
+            out_size = (out_size,out_size)
+        upscale.out_size = out_size
+        upscale.up = torch.nn.UpsamplingBilinear2d(size=self.out_size).cuda()
+        pass
+    def __call__(self,masks):
+        """
+            Upsamples masks and expands it to the same dimensions as the image
 
-def interval_score(model, model_name, image, baseline, label, up_masks, num_iter, output_func, noise=True):
+        values are set using the init() function
+        :param masks:
+        :return:
+        """
+        return self.up(masks).expand((-1,1) + self.out_size)  # TODO
+upscale = Upscale()
+def interval_score(model, model_name, images, baselines, labels, up_masks, num_iter, output_func, noise=True):
     """
-        Computes the score of masked image in a straight line
-        path from baseline to masked image, with num_iter intervals.
+        Computes the score of masked images in a straight line
+        path from baselines to masked images, with num_iter intervals.
 
     :param model:
     :param model_name:
-    :param image:
-    :param baseline:
-    :param label:
+    :param images:
+    :param baselines:
+    :param labels:
     :param up_masks:
     :param num_iter:
     :param noise:
@@ -84,13 +110,13 @@ def interval_score(model, model_name, image, baseline, label, up_masks, num_iter
     # The intervals to approximate the integral over
     intervals = torch.linspace(1/num_iter, 1, num_iter, requires_grad=False).cuda().view(-1, 1, 1, 1)
     interval_masks = up_masks.unsqueeze(1) * intervals
-    local_images = phi(image.unsqueeze(1), baseline.unsqueeze(1), interval_masks)
+    local_images = phi(images.unsqueeze(1), baselines.unsqueeze(1), interval_masks)
 
     if noise:
         local_images = local_images + torch.randn_like(local_images) * .2
 
-    # Shape of image tensor when viewed in batch form
-    new_shape = torch.tensor(image.shape) * torch.tensor(intervals.shape)
+    # Shape of images tensor when viewed in batch form
+    new_shape = torch.tensor(images.shape) * torch.tensor(intervals.shape)
 
     if model_name in ['m-rcnn', 'f-rcnn']: 
         losses = torch.cat([out['scores'] for out in model(local_images.view(*new_shape))]).view(-1, num_iter, 1)
@@ -99,41 +125,44 @@ def interval_score(model, model_name, image, baseline, label, up_masks, num_iter
         losses = model(local_images.view(*new_shape)).view(-1, num_iter, 1)
 
     else:
-        losses = output_func(local_images.view(*new_shape), model).view(image.shape[0], num_iter, -1)
-        losses = torch.gather(losses, 2, label.cuda().view(-1, 1).expand(-1, num_iter).view(-1, num_iter, 1))
+        losses = output_func(local_images.view(*new_shape), model).view(images.shape[0], num_iter, -1)
+        losses = torch.gather(losses, 2, labels.cuda().view(-1, 1).expand(-1, num_iter).view(-1, num_iter, 1))
 
     return losses / num_iter
 
 
-def integrated_gradient(model, model_name, image, baseline, label, up_masks, num_iter, output_func=None, noise=True):
+def integrated_gradient(model, model_name, images, baselines, labels, up_masks, num_iter, output_func=None, noise=True):
     """
         Calculates and backprops the integrated gradient.
         Does not have the original mask, so does not return the gradient
 
     :param model:
     :param model_name:
-    :param image:
-    :param baseline:
-    :param label:
+    :param images:
+    :param baselines:
+    :param labels:
     :param up_masks:
     :param num_iter:
     :param noise:
     :param output_func:
     :return:
     """
-    for i in range(image.shape[0]):
+    total_loss = 0
+    for i in range(images.shape[0]):
         loss = interval_score(
                 model,
                 model_name, 
-                image[i].unsqueeze(0),
-                baseline[i].unsqueeze(0),
-                label[i].unsqueeze(0),
+                images[i].unsqueeze(0),
+                baselines[i].unsqueeze(0),
+                labels[i].unsqueeze(0),
                 up_masks[i].unsqueeze(0),
                 num_iter,
                 output_func,
                 noise,
                 )
         loss.sum().backward(retain_graph=True)
+        total_loss += loss.sum()
+    return total_loss.item()
 
 
 def line_search(masks, total_grads, loss_func, alpha=8, beta=0.0001, decay=0.2,):
@@ -161,7 +190,11 @@ def line_search(masks, total_grads, loss_func, alpha=8, beta=0.0001, decay=0.2,)
         # Create initial alpha values for each mask
         alphas = torch.ones(num_inputs).cuda() * alpha
 
-        up_masks = upscale(masks.view(-1,*masks.shape[mod:])).view(-1, *masks.shape[1:mod], 1, upscale.out_size, upscale.out_size)
+        #up_masks = upscale(masks.view(-1,*masks.shape[mod:])).view(-1, *masks.shape[1:mod], 1, upscale.out_size, upscale.out_size)
+        out_size = upscale.out_size
+        if not hasattr(out_size,'__len__'):
+            out_size = (out_size,out_size)
+        up_masks = upscale(masks.view(-1,*masks.shape[mod:])).view(-1, *masks.shape[1:mod], 1, *out_size)
 
         # Compute the base loss used in the condition
         base_losses = loss_func(up_masks, masks, indices).view(-1)
@@ -171,14 +204,14 @@ def line_search(masks, total_grads, loss_func, alpha=8, beta=0.0001, decay=0.2,)
             # Create a new mask with the updated alpha value to
             # see if it meets condition
             new_masks = torch.clamp(masks[indices] - alphas[indices].view(-1,*(1,) * mod,1,1) * total_grads[indices], 0, 1)
-            up_masks = upscale(new_masks.view(-1,*masks.shape[mod:])).view(-1,*masks.shape[1:mod], 1, upscale.out_size, upscale.out_size)
+            up_masks = upscale(new_masks.view(-1,*masks.shape[mod:])).view(-1,*masks.shape[1:mod], 1, *out_size)
             # Calculate new losses
             losses = loss_func(up_masks, new_masks, indices).view(-1)
             # Get indices for each alpha that meets the condition for
             # their corresponding mask
-            indices[indices] = losses > base_losses[indices] + alphas[indices] * t[indices]
+            indices[indices.clone()] = losses > base_losses[indices] + alphas[indices] * t[indices]
             # Same for this, but for if the alpha values are too low (\alpha_l)
-            indices[indices] *= (alphas[indices] >= 0.00001)
+            indices[indices.clone()] *= (alphas[indices] >= 0.00001)
             # Break out of the loop if all alpha values satisfy the condition
             # or are too low
             if not indices.sum():
@@ -210,6 +243,9 @@ def softmax_output(inputs, model):
     :return:
     """
     return torch.nn.Softmax(dim=1)(model(inputs))
+    if out.ndim == 4:
+        out = out.mean(dim=(-1,-2))
+    return out
 
 
 def logit_output(inputs, model):
@@ -223,7 +259,7 @@ def logit_output(inputs, model):
     return model(inputs)
 
 
-def metric(image, baseline, mask, model, model_name, label, label_i, pred_data, size=28,):
+def metric(image, baseline, mask, model, model_name, labels, label_i, pred_data, size=28,):
     """
         Calculates the deletion/insertion scores/curves given the image and generated masks.
 
@@ -232,7 +268,7 @@ def metric(image, baseline, mask, model, model_name, label, label_i, pred_data, 
     :param mask:
     :param model:
     :param model_name:
-    :param label:
+    :param labels:
     :param label_i:
     :param pred_data:
     :param size:
@@ -262,9 +298,9 @@ def metric(image, baseline, mask, model, model_name, label, label_i, pred_data, 
         # Used for indexing with batch sizes
         l = torch.arange(image.shape[0])
         # The unmasked score
-        og_scores = score_output(image, model, model_name, l, label)
+        og_scores = score_output(image, model, model_name, l, labels)
         # The baseline score
-        blur_scores = score_output(baseline, model, model_name, l, label)
+        blur_scores = score_output(baseline, model, model_name, l, labels)
         # Initial values for the curves
         del_curve = [og_scores]
         ins_curve = [blur_scores]
@@ -287,7 +323,7 @@ def metric(image, baseline, mask, model, model_name, label, label_i, pred_data, 
             # Mask the image for deletion
             del_image = phi(image, baseline, up_mask)
             # Calculate new scores
-            outputs = score_output(del_image, model, model_name, l, label)
+            outputs = score_output(del_image, model, model_name, l, labels)
             del_curve.append(outputs)
             index.append((pixels+step)/num_pixels)
             del_scores += outputs * step if pixels + step < num_pixels else\
@@ -297,7 +333,7 @@ def metric(image, baseline, mask, model, model_name, label, label_i, pred_data, 
             ins_image = phi(baseline, image, up_mask)
 
             # Calculate the new scores
-            outputs = score_output(ins_image, model, model_name, l, label)
+            outputs = score_output(ins_image, model, model_name, l, labels)
 
             ins_curve.append(outputs)
             ins_scores += outputs * step if pixels + step < num_pixels else\

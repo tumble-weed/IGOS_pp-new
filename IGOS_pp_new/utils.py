@@ -16,12 +16,12 @@ import seaborn as sns
 import numpy as np
 
 from PIL import Image
-from methods_helper import *
-from detectors.yolo_utils.utils import non_max_suppression
+from .methods_helper import *
+from .detectors.yolo_utils.utils import non_max_suppression
 
-from detectors.m_rcnn import m_rcnn_fixp
-from detectors.f_rcnn import f_rcnn_fixp
-from detectors.yolo import yolov3spp_fix
+from .detectors.m_rcnn import m_rcnn_fixp
+from .detectors.f_rcnn import f_rcnn_fixp
+from .detectors.yolo import yolov3spp_fix
 
 # mean and standard deviation for the imagenet dataset
 mean = torch.tensor([0.485, 0.456, 0.406])
